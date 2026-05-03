@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+'use strict';
+
+const cmds = require('../src/commands');
+const c = require('../src/colors');
+
+function parseArgs(argv) {
+  const out = { positional: [], opts: {} };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--home' || a === '-H') { out.opts.home = argv[++i]; }
+    else if (a.startsWith('--home=')) { out.opts.home = a.slice(7); }
+    else if (a === '--force' || a === '-f') { out.opts.force = true; }
+    else if (a === '--help' || a === '-h') { out.opts.help = true; }
+    else if (a === '--version' || a === '-V') { out.opts.version = true; }
+    else { out.positional.push(a); }
+  }
+  return out;
+}
+
+function help() {
+  const u = c.bold;
+  console.log(`
+${u('codex-profile')} - manage multiple Codex CLI auth.json profiles
+
+${u('USAGE')}
+  codex-profile <command> [args] [--home <path>] [--force]
+
+${u('COMMANDS')}
+  ${u('shell')}                      Interactive REPL (default when run with no args in a TTY)
+  ${u('login')}   <name>             Run 'codex login' in isolation, save result to profiles/<name>.json
+  ${u('save')}    <name>             Snapshot current auth.json (already-logged-in) into profiles/<name>.json
+  ${u('list')}                       Show all profiles with usability/expiry status
+  ${u('use')}     <name>             Replace <CODEX_HOME>/auth.json with profile <name>
+  ${u('current')}                    Print which saved profile matches the live auth.json
+  ${u('rename')}  <old> <new>        Rename a profile
+  ${u('remove')}  <name>             Delete a profile
+  ${u('restore')}                    Revert auth.json to the auto-backup made by last 'use'
+  ${u('where')}                      Print resolved paths
+  ${u('help')}                       Show this help
+
+${u('OPTIONS')}
+  --home <path>    Override CODEX_HOME (default: \$env:CODEX_HOME or ~/.codex)
+  --force, -f      Overwrite existing profile / switch even if codex is running
+  --version, -V    Print version
+
+${u('ENV')}
+  CODEX_HOME           Codex home folder (contains auth.json)
+  CP_PROFILES_DIR      Override profiles directory (default: <repo>/profiles)
+  NO_COLOR             Disable colored output
+
+${u('EXAMPLES')}
+  codex-profile login work
+  codex-profile login personal
+  codex-profile list
+  codex-profile use personal
+  codex-profile use work --home "%USERPROFILE%\\.codex"
+`);
+}
+
+(async () => {
+  const argv = process.argv.slice(2);
+  const { positional, opts } = parseArgs(argv);
+
+  if (opts.version) { console.log(require('../package.json').version); return; }
+  if (opts.help && positional.length === 0) { help(); return; }
+
+  // No args + interactive terminal -> launch shell. Otherwise default to `list`.
+  if (positional.length === 0) {
+    if (process.stdout.isTTY && process.stdin.isTTY) {
+      positional.push('shell');
+    } else {
+      positional.push('list');
+    }
+  }
+
+  try {
+    await cmds.dispatch(positional, opts, help);
+  } catch (err) {
+    console.error(c.red('Error: ') + (err && err.message ? err.message : String(err)));
+    process.exit(1);
+  }
+})();

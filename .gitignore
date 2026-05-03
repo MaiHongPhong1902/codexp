@@ -1,0 +1,5 @@
+node_modules/
+profiles/*.json
+profiles/.backup.json
+profiles/.active
+profiles/.usage-cache.json

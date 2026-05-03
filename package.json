@@ -1,0 +1,41 @@
+{
+  "name": "codexp-cli",
+  "version": "1.0.0",
+  "description": "Manage multiple OpenAI Codex CLI auth.json profiles — login, switch, usage tracking. Zero dependencies.",
+  "keywords": [
+    "codex",
+    "openai",
+    "cli",
+    "profile",
+    "auth",
+    "multi-account",
+    "usage"
+  ],
+  "license": "MIT",
+  "author": "MaiHongPhong1902",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MaiHongPhong1902/codexp.git"
+  },
+  "homepage": "https://github.com/MaiHongPhong1902/codexp#readme",
+  "bugs": {
+    "url": "https://github.com/MaiHongPhong1902/codexp/issues"
+  },
+  "bin": {
+    "codexp": "bin/codex-profile.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "codex-profile.cmd",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/codex-profile.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
