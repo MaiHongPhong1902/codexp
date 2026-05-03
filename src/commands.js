@@ -33,6 +33,24 @@ function getCachedUsage(profileName) {
   return cache[profileName] || null;
 }
 
+async function refreshUsageForProfile(profileName, authPath, opts = {}) {
+  let info;
+  try { info = A.readAuth(authPath); } catch { return false; }
+  const accessToken = (info && info.raw && info.raw.tokens) ? info.raw.tokens.access_token : null;
+  if (!accessToken) return false;
+  try {
+    if (opts.logStart) console.log(c.dim(opts.logStart));
+    const usage = await fetchUsage(accessToken);
+    saveUsageForProfile(profileName, usage);
+    return true;
+  } catch (e) {
+    if (opts.logErrors) {
+      console.log(c.dim(`  (could not fetch usage for ${profileName}: ${e.message || e})`));
+    }
+  }
+  return false;
+}
+
 // ---------- helpers ----------------------------------------------------------
 
 function listProfiles() {
@@ -187,6 +205,11 @@ async function cmdUse(name, opts) {
           let curInfo; try { curInfo = A.readAuth(currentProfile); } catch {}
           console.log(c.dim(`Auto-saved current auth.json -> profiles/${currentActive}.json`) +
             (curInfo && curInfo.email ? c.dim(` (${curInfo.email})`) : ''));
+
+          await refreshUsageForProfile(currentActive, currentProfile, {
+            logStart: `  Updating usage for '${currentActive}'...`,
+            logErrors: true,
+          });
         }
       }
     }
@@ -222,6 +245,8 @@ async function cmdUse(name, opts) {
   }
 
   console.log(c.cyan('\nNow start Codex:  ') + c.bold('codex'));
+
+  await cmdList(opts);
 }
 
 async function cmdRemove(name) {
