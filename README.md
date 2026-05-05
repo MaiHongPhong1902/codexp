@@ -43,6 +43,25 @@ Tùy chọn:
 
 - `--home <đường dẫn>` — thay đổi thư mục Codex home (mặc định: `$CODEX_HOME` hoặc `~/.codex`)
 - `--force` — bỏ qua cảnh báo process đang chạy
+- `CP_PROFILES_DIR` — đổi nơi lưu profile (mặc định: thư mục dữ liệu người dùng `codexp/profiles`)
+
+### Cấu hình đường dẫn profiles
+
+Khi cài global qua `npm install -g`, cần set biến môi trường `CP_PROFILES_DIR` để trỏ đến thư mục profiles:
+
+**Windows (PowerShell — set vĩnh viễn cho user):**
+
+```powershell
+[System.Environment]::SetEnvironmentVariable('CP_PROFILES_DIR', 'C:\path\to\profiles', 'User')
+```
+
+**Linux/macOS:**
+
+```bash
+echo 'export CP_PROFILES_DIR="$HOME/.codexp/profiles"' >> ~/.bashrc
+```
+
+Khởi động lại terminal sau khi set.
 
 ## Thông tin hiển thị
 
@@ -102,11 +121,6 @@ codexp/
 │   ├── colors.js            # hỗ trợ màu ANSI
 │   ├── commands.js          # tất cả lệnh
 │   └── paths.js             # xử lý đường dẫn (CODEX_HOME, thư mục profiles)
-├── profiles/                # dữ liệu profile (gitignored)
-│   ├── <email>.json         # bản lưu auth.json
-│   ├── .active              # profile đang active
-│   ├── .backup.json         # backup trước khi chuyển
-│   └── .usage-cache.json    # cache dữ liệu usage
 ├── codex-profile.cmd        # wrapper cho Windows
 ├── package.json
 ├── LICENSE
@@ -116,7 +130,7 @@ codexp/
 
 ## Bảo mật
 
-`profiles/*.json` chứa **OAuth refresh tokens** — coi chúng như mật khẩu.
+Các file profile JSON chứa **OAuth refresh tokens** — coi chúng như mật khẩu.
 Không commit, không chia sẻ. `.gitignore` đã loại trừ tất cả dữ liệu profile.
 
 ## Giấy phép

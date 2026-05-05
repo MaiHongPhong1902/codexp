@@ -8,7 +8,7 @@ function parseArgs(argv) {
   const out = { positional: [], opts: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--home' || a === '-H') { out.opts.home = argv[++i]; }
+    if (a === '--home' || a === '-H') { if (i + 1 >= argv.length) throw new Error('--home requires a path argument.'); out.opts.home = argv[++i]; }
     else if (a.startsWith('--home=')) { out.opts.home = a.slice(7); }
     else if (a === '--force' || a === '-f') { out.opts.force = true; }
     else if (a === '--help' || a === '-h') { out.opts.help = true; }
@@ -21,17 +21,19 @@ function parseArgs(argv) {
 function help() {
   const u = c.bold;
   console.log(`
-${u('codex-profile')} - manage multiple Codex CLI auth.json profiles
+${u('codexp')} - manage multiple Codex CLI auth.json profiles
 
 ${u('USAGE')}
-  codex-profile <command> [args] [--home <path>] [--force]
+  codexp <command> [args] [--home <path>] [--force]
 
 ${u('COMMANDS')}
   ${u('shell')}                      Interactive REPL (default when run with no args in a TTY)
   ${u('login')}   <name>             Run 'codex login' in isolation, save result to profiles/<name>.json
+  ${u('refresh')} <name>             Re-login to an existing profile to refresh access/refresh tokens
   ${u('save')}    <name>             Snapshot current auth.json (already-logged-in) into profiles/<name>.json
   ${u('list')}                       Show all profiles with usability/expiry status
   ${u('use')}     <name>             Replace <CODEX_HOME>/auth.json with profile <name>
+  ${u('status')}  [name]             Fetch live usage/status from API for a profile (or current if no name)
   ${u('current')}                    Print which saved profile matches the live auth.json
   ${u('rename')}  <old> <new>        Rename a profile
   ${u('remove')}  <name>             Delete a profile
@@ -46,15 +48,17 @@ ${u('OPTIONS')}
 
 ${u('ENV')}
   CODEX_HOME           Codex home folder (contains auth.json)
-  CP_PROFILES_DIR      Override profiles directory (default: <repo>/profiles)
+  CP_PROFILES_DIR      Override profiles directory (default: per-user codexp data dir)
   NO_COLOR             Disable colored output
 
 ${u('EXAMPLES')}
-  codex-profile login work
-  codex-profile login personal
-  codex-profile list
-  codex-profile use personal
-  codex-profile use work --home "%USERPROFILE%\\.codex"
+  codexp login work
+  codexp refresh work                         # refresh tokens for 'work'
+  codexp login personal
+  codexp list
+  codexp use personal
+  codexp status                               # check current usage
+  codexp use work --home "%USERPROFILE%\\.codex"
 `);
 }
 

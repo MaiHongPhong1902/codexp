@@ -4,11 +4,22 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-// Profiles are stored next to the CLI installation, in a sibling `profiles/` folder.
-// (i.e. <repo>/codex-profile-cli/../profiles)  -- but user can override with $CP_PROFILES_DIR.
+const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+// Profiles contain OAuth tokens, so the default storage is per-user data instead
+// of a source/package directory. Override with CP_PROFILES_DIR when needed.
 function profilesDir() {
   if (process.env.CP_PROFILES_DIR) return path.resolve(process.env.CP_PROFILES_DIR);
-  return path.resolve(__dirname, '..', 'profiles');
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    return path.join(process.env.APPDATA, 'codexp', 'profiles');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'codexp', 'profiles');
+  }
+  if (process.env.XDG_CONFIG_HOME) {
+    return path.join(process.env.XDG_CONFIG_HOME, 'codexp', 'profiles');
+  }
+  return path.join(os.homedir(), '.codexp', 'profiles');
 }
 
 // The Codex home (folder that holds auth.json). Resolution order:
@@ -25,8 +36,41 @@ function authFile(codexHome) {
   return path.join(codexHome, 'auth.json');
 }
 
+function validateProfileName(name) {
+  if (typeof name !== 'string' || !name) {
+    throw new Error('Profile name is required.');
+  }
+  if (!PROFILE_NAME_RE.test(name)) {
+    throw new Error('Invalid profile name. Use 1-128 characters: letters, numbers, dot, dash, or underscore; start with a letter or number.');
+  }
+  return name;
+}
+
+function isValidProfileName(name) {
+  try {
+    validateProfileName(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeProfileName(value) {
+  const cleaned = String(value || '')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^[^A-Za-z0-9]+/, '')
+    .slice(0, 128);
+  return isValidProfileName(cleaned) ? cleaned : null;
+}
+
 function profileFile(name) {
-  return path.join(profilesDir(), `${name}.json`);
+  const safeName = validateProfileName(name);
+  const base = path.resolve(profilesDir());
+  const file = path.resolve(base, `${safeName}.json`);
+  if (!file.startsWith(base + path.sep)) {
+    throw new Error('Profile path escaped the profiles directory.');
+  }
+  return file;
 }
 
 function activeFile() {
@@ -48,6 +92,9 @@ module.exports = {
   resolveCodexHome,
   authFile,
   profileFile,
+  validateProfileName,
+  isValidProfileName,
+  sanitizeProfileName,
   activeFile,
   ensureProfilesDir,
   username,

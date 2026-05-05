@@ -41,6 +41,7 @@ Flags:
 
 - `--home <path>` — override Codex home (default: `$CODEX_HOME` or `~/.codex`)
 - `--force` — skip running-process warning
+- `CP_PROFILES_DIR` — override profile storage (default: per-user `codexp/profiles` data dir)
 
 ## What it shows
 
@@ -100,11 +101,6 @@ codexp/
 │   ├── colors.js            # ANSI color helpers
 │   ├── commands.js          # all commands
 │   └── paths.js             # path resolution (CODEX_HOME, profiles dir)
-├── profiles/                # profile data (gitignored)
-│   ├── <email>.json         # saved auth.json snapshots
-│   ├── .active              # currently active profile
-│   ├── .backup.json         # backup before last switch
-│   └── .usage-cache.json    # cached usage data
 ├── codex-profile.cmd        # Windows wrapper
 ├── package.json
 ├── LICENSE
@@ -113,7 +109,7 @@ codexp/
 
 ## Security
 
-`profiles/*.json` contain **OAuth refresh tokens** — treat them like passwords.
+Saved profile JSON files contain **OAuth refresh tokens** — treat them like passwords.
 Never commit or share them. The included `.gitignore` excludes all profile data.
 
 ## License

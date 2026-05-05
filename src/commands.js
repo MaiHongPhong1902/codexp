@@ -19,7 +19,8 @@ function readUsageCache() {
 
 function writeUsageCache(cache) {
   P.ensureProfilesDir();
-  fs.writeFileSync(USAGE_CACHE_FILE(), JSON.stringify(cache, null, 2));
+  const cacheFile = USAGE_CACHE_FILE();
+  atomicWriteFile(cacheFile, JSON.stringify(cache, null, 2), 'utf8');
 }
 
 function saveUsageForProfile(profileName, usage) {
@@ -58,14 +59,20 @@ function listProfiles() {
   return fs.readdirSync(P.profilesDir())
     .filter(f => f.endsWith('.json') && !f.startsWith('.'))
     .map(f => f.replace(/\.json$/, ''))
+    .filter(P.isValidProfileName)
     .sort();
 }
 
 function getActive() {
-  try { return fs.readFileSync(P.activeFile(), 'utf8').trim() || null; } catch { return null; }
+  try {
+    const name = fs.readFileSync(P.activeFile(), 'utf8').trim();
+    return P.isValidProfileName(name) ? name : null;
+  } catch { return null; }
 }
 function setActive(name) {
-  fs.writeFileSync(P.activeFile(), name, 'utf8');
+  P.validateProfileName(name);
+  P.ensureProfilesDir();
+  atomicWriteFile(P.activeFile(), name, 'utf8');
 }
 
 function isCodexRunning() {
@@ -98,6 +105,74 @@ function ensureCodexBinary() {
   return r.stdout.split(/\r?\n/)[0].trim();
 }
 
+function fsyncFile(filePath) {
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    fs.fsyncSync(fd);
+  } catch {
+    // Best-effort: some Windows/sandboxed filesystems reject fsync.
+  } finally {
+    if (fd != null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+}
+
+function fsyncDir(dirPath) {
+  let fd = null;
+  try {
+    fd = fs.openSync(dirPath, 'r');
+    fs.fsyncSync(fd);
+  } catch {
+    // Directory fsync is best-effort and not supported on every platform.
+  } finally {
+    if (fd != null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+}
+
+function tempPathFor(filePath) {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  return path.join(dir, `.${base}.${process.pid}.${Date.now()}.tmp`);
+}
+
+function atomicWriteFile(filePath, data, encoding) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = tempPathFor(filePath);
+  let renamed = false;
+  try {
+    fs.writeFileSync(tmp, data, encoding);
+    fsyncFile(tmp);
+    fs.renameSync(tmp, filePath);
+    renamed = true;
+    fsyncDir(path.dirname(filePath));
+  } finally {
+    if (!renamed) {
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+    }
+  }
+}
+
+function atomicCopyFile(src, dst) {
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  const tmp = tempPathFor(dst);
+  let renamed = false;
+  try {
+    fs.copyFileSync(src, tmp);
+    fsyncFile(tmp);
+    fs.renameSync(tmp, dst);
+    renamed = true;
+    fsyncDir(path.dirname(dst));
+  } finally {
+    if (!renamed) {
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+    }
+  }
+}
+
 // ---------- commands ---------------------------------------------------------
 
 async function cmdList(opts) {
@@ -110,7 +185,7 @@ async function cmdList(opts) {
   console.log('');
 
   if (names.length === 0) {
-    console.log(c.gray("  (no profiles yet - run 'codex-profile login <name>' or 'save <name>')"));
+    console.log(c.gray("  (no profiles yet - run 'codexp login <name>' or 'save <name>')"));
     console.log('');
     return;
   }
@@ -165,19 +240,19 @@ async function cmdSave(name, opts) {
   // Auto-derive name from account email if not provided
   if (!name) {
     const info = A.readAuth(src);
-    name = info.email ? info.email.replace(/[^A-Za-z0-9._-]/g, '_') : null;
+    name = info.email ? P.sanitizeProfileName(info.email) : null;
     if (!name) throw new Error('Cannot detect account from auth.json. Provide a name: save <name>');
   }
 
   const dst = P.profileFile(name);
-  fs.copyFileSync(src, dst);
+  atomicCopyFile(src, dst);
   setActive(name);
   let info; try { info = A.readAuth(dst); } catch {}
   console.log(c.green(`Saved -> profiles/${name}.json`) + (info && info.email ? c.dim(` (${info.email})`) : ''));
 }
 
 async function cmdUse(name, opts) {
-  if (!name) throw new Error('Usage: codex-profile use <name>');
+  if (!name) throw new Error('Usage: codexp use <name>');
   const src = P.profileFile(name);
   if (!fs.existsSync(src)) throw new Error(`Profile '${name}' not found.`);
 
@@ -192,65 +267,114 @@ async function cmdUse(name, opts) {
     return;
   }
 
-  // Auto-save current auth.json back into the active profile before switching.
-  // This ensures the latest tokens (possibly refreshed by Codex) are preserved.
+  // === STEP 1: Check status of new profile before switching ===
+  console.log(c.dim(`Checking profile '${name}'...`));
+  let newInfo; try { newInfo = A.readAuth(src); } catch { newInfo = null; }
+  
+  if (!newInfo) {
+    throw new Error(`Cannot read profile '${name}' - file may be corrupted.`);
+  }
+
+  // Check token expiry
+  const accessToken = (newInfo && newInfo.raw && newInfo.raw.tokens) ? newInfo.raw.tokens.access_token : null;
+  const accExpMs = newInfo.accessExp ? newInfo.accessExp.getTime() - Date.now() : null;
+  const refExpMs = newInfo.refreshExp ? newInfo.refreshExp.getTime() - Date.now() : null;
+  const isUsable = (accExpMs != null && accExpMs > 0) || (refExpMs != null && refExpMs > 0);
+
+  console.log(c.dim(`  Email   : ${newInfo.email || '(unknown)'}`));
+  console.log('  ' + fmtExpiry('access  ', newInfo.accessExp));
+  console.log('  ' + fmtExpiry('refresh ', newInfo.refreshExp));
+
+  if (!isUsable) {
+    console.log(c.yellow('\nWARNING: Both access and refresh tokens are EXPIRED.'));
+    console.log(c.yellow('  This profile may not work. Run: codexp refresh ' + name));
+  }
+
+  // === STEP 2: Fetch status/usage to verify profile is active ===
+  if (accessToken) {
+    try {
+      console.log(c.dim('\nVerifying profile status with API...'));
+      const usage = await fetchUsage(accessToken);
+      saveUsageForProfile(name, usage);
+      
+      const rl = usage.rate_limit || {};
+      const now = Date.now();
+      const pw = smartWindow(rl.primary_window, now);
+      const sw = smartWindow(rl.secondary_window, now);
+      if (pw) console.log(`  ${c.dim('5h limit:')} ${renderBar(pw.used, 20)}${fmtReset(pw.resetAt)}${pw.didReset ? c.green(' [reset]') : ''}`);
+      if (sw) console.log(`  ${c.dim('weekly  :')} ${renderBar(sw.used, 20)}${fmtReset(sw.resetAt)}${sw.didReset ? c.green(' [reset]') : ''}`);
+      
+      console.log(c.green('  ✓ Profile is ACTIVE'));
+    } catch (e) {
+      console.log(c.yellow(`\nWARNING: Could not verify profile status (${e.message || e})`));
+      console.log(c.yellow('  Profile may be expired or account may be deactivated.'));
+      console.log(c.yellow('  Continuing anyway...'));
+    }
+  } else {
+    console.log(c.yellow('\nWARNING: No access token found.'));
+  }
+
+  // === STEP 3: Auto-save current auth.json back into the active profile ===
+  console.log(c.dim('\nUpdating previous profile...'));
   if (fs.existsSync(dst)) {
     const currentActive = getActive();
     if (currentActive && currentActive !== name) {
       const currentProfile = P.profileFile(currentActive);
       if (fs.existsSync(currentProfile)) {
-        // Only update if live auth.json is newer (different) than saved profile
-        if (!A.sameLogin(dst, currentProfile) || A.fileFingerprint(dst) !== A.fileFingerprint(currentProfile)) {
-          fs.copyFileSync(dst, currentProfile);
-          let curInfo; try { curInfo = A.readAuth(currentProfile); } catch {}
-          console.log(c.dim(`Auto-saved current auth.json -> profiles/${currentActive}.json`) +
-            (curInfo && curInfo.email ? c.dim(` (${curInfo.email})`) : ''));
+        if (A.sameLogin(dst, currentProfile)) {
+          // Only update if live auth.json is newer (different) than saved profile.
+          if (A.fileFingerprint(dst) !== A.fileFingerprint(currentProfile)) {
+            atomicCopyFile(dst, currentProfile);
+            let curInfo; try { curInfo = A.readAuth(currentProfile); } catch {}
+            console.log(c.dim(`  Saved profile '${currentActive}'`) +
+              (curInfo && curInfo.email ? c.dim(` (${curInfo.email})`) : ''));
 
-          await refreshUsageForProfile(currentActive, currentProfile, {
-            logStart: `  Updating usage for '${currentActive}'...`,
-            logErrors: true,
-          });
+            await refreshUsageForProfile(currentActive, currentProfile, {
+              logStart: c.dim(`  Updating usage for '${currentActive}'...`),
+              logErrors: true,
+            });
+          } else {
+            console.log(c.dim(`  Profile '${currentActive}' already up-to-date`));
+          }
+        } else {
+          let curInfo; try { curInfo = A.readAuth(currentProfile); } catch {}
+          const label = curInfo && curInfo.email ? ` (${curInfo.email})` : '';
+          console.log(c.yellow(`  Skipped saving '${currentActive}'${label}: live auth.json does not match that profile.`));
         }
       }
     }
     // Also keep a backup
-    fs.copyFileSync(dst, path.join(P.profilesDir(), '.backup.json'));
+    atomicCopyFile(dst, path.join(P.profilesDir(), '.backup.json'));
+  } else {
+    console.log(c.dim('  (no previous profile to save)'));
   }
 
-  fs.copyFileSync(src, dst);
+  // === STEP 4: Switch to new profile ===
+  console.log(c.dim('\nSwitching profile...'));
+  atomicCopyFile(src, dst);
   setActive(name);
+  console.log(c.green(`✓ Switched to profile '${name}'`));
 
-  // Show expiry of newly active profile
-  let info; try { info = A.readAuth(dst); } catch { info = null; }
-  console.log(c.green(`Switched -> profile '${name}'`));
-  if (info) {
-    if (info.email) console.log(c.dim(`  account : `) + info.email);
-    console.log('  ' + fmtExpiry('access  ', info.accessExp));
-    console.log('  ' + fmtExpiry('refresh ', info.refreshExp));
+  // === STEP 5: Display summary ===
+  console.log('');
+  console.log(c.bold(`Profile Information:`));
+  if (newInfo) {
+    if (newInfo.email) console.log(`  Account : ${newInfo.email}${newInfo.plan ? ` (${newInfo.plan})` : ''}`);
+    if (newInfo.accountId) console.log(`  ID      : ${newInfo.accountId}`);
+    console.log('  ' + fmtExpiry('Access  ', newInfo.accessExp));
+    console.log('  ' + fmtExpiry('Refresh ', newInfo.refreshExp));
   }
 
-  // Fetch & cache usage for the new profile
-  const accessToken = (info && info.raw && info.raw.tokens) ? info.raw.tokens.access_token : null;
-  if (accessToken) {
-    try {
-      console.log(c.dim('  Fetching usage...'));
-      const usage = await fetchUsage(accessToken);
-      saveUsageForProfile(name, usage);
-      const rl = usage.rate_limit || {};
-      if (rl.primary_window) console.log(`  ${c.dim('5h limit:')} ${renderBar(rl.primary_window.used_percent, 20)}${fmtReset(rl.primary_window.reset_at)}`);
-      if (rl.secondary_window) console.log(`  ${c.dim('weekly  :')} ${renderBar(rl.secondary_window.used_percent, 20)}${fmtReset(rl.secondary_window.reset_at)}`);
-    } catch (e) {
-      console.log(c.dim('  (could not fetch usage: ' + (e.message || e) + ')'));
-    }
-  }
+  console.log('');
+  console.log(c.cyan('Next step: ') + c.bold('codex'));
 
-  console.log(c.cyan('\nNow start Codex:  ') + c.bold('codex'));
-
+  // Show updated list at the end
+  console.log('');
   await cmdList(opts);
 }
 
 async function cmdRemove(name) {
-  if (!name) throw new Error('Usage: codex-profile remove <name>');
+  if (!name) throw new Error('Usage: codexp remove <name>');
   const f = P.profileFile(name);
   if (!fs.existsSync(f)) throw new Error(`Profile '${name}' not found.`);
   fs.unlinkSync(f);
@@ -259,8 +383,8 @@ async function cmdRemove(name) {
 }
 
 async function cmdRename(oldName, newName) {
-  if (!oldName || !newName) throw new Error('Usage: codex-profile rename <old> <new>');
-  if (!/^[A-Za-z0-9._-]+$/.test(newName)) throw new Error('Invalid new name.');
+  if (!oldName || !newName) throw new Error('Usage: codexp rename <old> <new>');
+  P.validateProfileName(newName);
   const src = P.profileFile(oldName), dst = P.profileFile(newName);
   if (!fs.existsSync(src)) throw new Error(`Profile '${oldName}' not found.`);
   if (fs.existsSync(dst))  throw new Error(`Profile '${newName}' already exists.`);
@@ -296,7 +420,7 @@ async function cmdRestore(opts) {
   const dst = P.authFile(codexHome);
   const bak = path.join(P.profilesDir(), '.backup.json');
   if (!fs.existsSync(bak)) throw new Error(`No backup found at ${bak}`);
-  fs.copyFileSync(bak, dst);
+  atomicCopyFile(bak, dst);
   console.log(c.green(`Restored ${dst} from .backup.json`));
 }
 
@@ -328,14 +452,13 @@ async function cmdLogin(name, opts) {
   if (!name) {
     try {
       const info = A.readAuth(newAuth);
-      name = info.email ? info.email.replace(/[^A-Za-z0-9._-]/g, '_') : null;
+      name = info.email ? P.sanitizeProfileName(info.email) : null;
     } catch {}
     if (!name) throw new Error('Cannot detect account. Provide a name: login <name>');
   }
 
   const dst = P.profileFile(name);
-  fs.copyFileSync(newAuth, dst);
-  setActive(name);
+  atomicCopyFile(newAuth, dst);
 
   // best-effort cleanup
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch {}
@@ -356,8 +479,11 @@ async function cmdLogin(name, opts) {
       const usage = await fetchUsage(accessToken);
       saveUsageForProfile(name, usage);
       const rl = usage.rate_limit || {};
-      if (rl.primary_window) console.log(`  ${c.dim('5h limit:')} ${renderBar(rl.primary_window.used_percent, 20)}${fmtReset(rl.primary_window.reset_at)}`);
-      if (rl.secondary_window) console.log(`  ${c.dim('weekly  :')} ${renderBar(rl.secondary_window.used_percent, 20)}${fmtReset(rl.secondary_window.reset_at)}`);
+      const now = Date.now();
+      const pw = smartWindow(rl.primary_window, now);
+      const sw = smartWindow(rl.secondary_window, now);
+      if (pw) console.log(`  ${c.dim('5h limit:')} ${renderBar(pw.used, 20)}${fmtReset(pw.resetAt)}${pw.didReset ? c.green(' [reset]') : ''}`);
+      if (sw) console.log(`  ${c.dim('weekly  :')} ${renderBar(sw.used, 20)}${fmtReset(sw.resetAt)}${sw.didReset ? c.green(' [reset]') : ''}`);
     } catch (e) {
       console.log(c.dim('  (could not fetch usage: ' + (e.message || e) + ')'));
     }
@@ -427,7 +553,8 @@ function smartWindow(window, nowMs) {
   if (nowMs >= resetMs) {
     // Window has reset since last fetch
     const windowSec = window.limit_window_seconds || 18000; // default 5h
-    const newResetAt = window.reset_at + windowSec;
+    let newResetAt = window.reset_at;
+    while (newResetAt * 1000 <= nowMs) newResetAt += windowSec;
     return { used: 0, resetAt: newResetAt, didReset: true };
   }
   return { used: window.used_percent || 0, resetAt: window.reset_at, didReset: false };
@@ -508,7 +635,11 @@ async function cmdStatus(name, opts) {
 
 // ---------- dispatcher ------------------------------------------------------
 
-const COMMANDS = ['list', 'login', 'refresh', 'use', 'remove', 'status', 'help', 'shell', 'menu', 'exit', 'quit', 'clear', 'cls'];
+const COMMANDS = [
+  'list', 'login', 'refresh', 'save', 'use', 'status', 'current', 'rename',
+  'remove', 'restore', 'where', 'help', 'shell', 'menu', 'exit', 'quit',
+  'clear', 'cls',
+];
 
 async function dispatch(positional, opts, helpFn) {
   const sub = positional[0] || 'list';
@@ -519,6 +650,9 @@ async function dispatch(positional, opts, helpFn) {
     case 'use':     await cmdUse(positional[1], opts); break;
     case 'remove': case 'rm': case 'delete':
                     await cmdRemove(positional[1]); break;
+    case 'rename':  await cmdRename(positional[1], positional[2]); break;
+    case 'restore': await cmdRestore(opts); break;
+    case 'where':   await cmdWhere(opts); break;
     case 'current': await cmdCurrent(opts); break;
     case 'status': case 'usage':
                     await cmdStatus(positional[1], opts); break;
@@ -544,7 +678,7 @@ async function cmdShell(opts, helpFn) {
       return [hits.length ? hits : COMMANDS, parts[0]];
     }
     // complete profile names for use/remove/rename/save
-    if (['use', 'remove', 'rm', 'delete', 'refresh', 'status', 'usage'].includes(parts[0])) {
+    if (['use', 'remove', 'rm', 'delete', 'refresh', 'status', 'usage', 'rename'].includes(parts[0])) {
       const names = listProfiles();
       const last = parts[parts.length - 1];
       const hits = names.filter(n => n.startsWith(last));
@@ -575,23 +709,27 @@ async function cmdShell(opts, helpFn) {
   rl.prompt();
 
   let done = false;
+  let pending = Promise.resolve();
   await new Promise((resolve) => {
-    rl.on('line', async (line) => {
+    rl.on('line', (line) => {
       if (done) return;
-      const trimmed = line.trim();
-      if (!trimmed) { if (!done) rl.prompt(); return; }
-      const args = parseShellLine(trimmed);
-      const head = args[0].toLowerCase();
+      pending = pending.then(async () => {
+        if (done) return;
+        const trimmed = line.trim();
+        if (!trimmed) { if (!done) rl.prompt(); return; }
+        const args = parseShellLine(trimmed);
+        const head = args[0].toLowerCase();
 
-      if (head === 'exit' || head === 'quit' || head === 'q') { done = true; rl.close(); return; }
-      if (head === 'clear' || head === 'cls') { console.clear(); if (!done) rl.prompt(); return; }
+        if (head === 'exit' || head === 'quit' || head === 'q') { done = true; rl.close(); return; }
+        if (head === 'clear' || head === 'cls') { console.clear(); if (!done) rl.prompt(); return; }
 
-      try {
-        await dispatch(args, opts, helpFn);
-      } catch (e) {
-        console.error(c.red('Error: ') + (e && e.message ? e.message : String(e)));
-      }
-      if (!done) rl.prompt();
+        try {
+          await dispatch(args, opts, helpFn);
+        } catch (e) {
+          console.error(c.red('Error: ') + (e && e.message ? e.message : String(e)));
+        }
+        if (!done) rl.prompt();
+      });
     });
     rl.on('close', () => { done = true; console.log(c.dim('\nbye.')); resolve(); });
     rl.on('SIGINT', () => { done = true; rl.close(); });
@@ -608,6 +746,7 @@ function parseShellLine(line) {
 }
 
 module.exports = {
-  cmdList, cmdSave, cmdUse, cmdRemove, cmdCurrent, cmdStatus, cmdLogin, cmdRefresh, cmdShell,
+  cmdList, cmdSave, cmdUse, cmdRemove, cmdRename, cmdCurrent, cmdWhere, cmdRestore,
+  cmdStatus, cmdLogin, cmdRefresh, cmdShell,
   dispatch, COMMANDS,
 };

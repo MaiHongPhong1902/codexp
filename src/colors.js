@@ -1,7 +1,11 @@
 'use strict';
 
-const useColor = process.stdout.isTTY && process.env.NO_COLOR == null;
-const wrap = (open, close) => (s) => useColor ? `\x1b[${open}m${s}\x1b[${close}m` : String(s);
+const canColor = (stream) => stream && stream.isTTY && process.env.NO_COLOR == null;
+const wrap = (open, close) => {
+  const fn = (s) => canColor(process.stdout) ? `\x1b[${open}m${s}\x1b[${close}m` : String(s);
+  fn.stderr = (s) => canColor(process.stderr) ? `\x1b[${open}m${s}\x1b[${close}m` : String(s);
+  return fn;
+};
 
 module.exports = {
   bold:    wrap(1, 22),
