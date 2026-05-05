@@ -1,6 +1,6 @@
 {
   "name": "codexp-cli",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Manage multiple OpenAI Codex CLI auth.json profiles — login, switch, usage tracking. Zero dependencies.",
   "keywords": [
     "codex",
